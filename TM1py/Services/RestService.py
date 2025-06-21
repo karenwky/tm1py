@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 import json
 import re
-import socket
 import time
 import warnings
+from ast import literal_eval
 from base64 import b64encode, b64decode
 from enum import Enum
 from http.client import HTTPResponse
@@ -38,8 +38,12 @@ class AuthenticationMode(Enum):
     WIA = 2
     CAM = 3
     CAM_SSO = 4
+    # 5 is legacy early-release of v12. Deprecate with next major release
     IBM_CLOUD_API_KEY = 5
     SERVICE_TO_SERVICE = 6
+    PA_PROXY = 7
+    BASIC_API_KEY = 8
+    ACCESS_TOKEN = 9
 
     @property
     def use_v12_auth(self):
@@ -74,16 +78,6 @@ class RestService:
 
     DEFAULT_CONNECTION_POOL_SIZE = 10
 
-    # You can reset the following TCP socket options based on your own use cases when tcp_keepalive is enabled
-    # TCP_KEEPIDLE: Time in seconds until the first keepalive is sent
-    # TCP_KEEPINTVL: How often should the keepalive packet be sent
-    # TCP_KEEPCNT: The max number of keepalive packets to send
-    TCP_SOCKET_OPTIONS = {
-        'TCP_KEEPIDLE': 30,
-        'TCP_KEEPINTVL': 15,
-        'TCP_KEEPCNT': 60
-    }
-
     def __init__(self, **kwargs):
         """ Create an instance of RESTService
         :param address: String - address of the TM1 instance
@@ -104,6 +98,7 @@ class RestService:
         :param api_key: String - planing analytics engine (v12) API Key from https://cloud.ibm.com/iam/apikeys
         :param iam_url: String - planing analytics engine (v12) IBM Cloud IAM URL. Default: "https://iam.cloud.ibm.com"
         :param pa_url: String - planing analytics engine (v12) PA URL e.g., "https://us-east-2.aws.planninganalytics.ibm.com"
+        :param cpd_url: String - cloud pack for data url (aka ZEN) CPD URL e.g., "https://cpd-zen.apps.cp4dpa-test11.cp.fyre.ibm.com"
         :param tenant: String - planing analytics engine (v12) Tenant e.g., YC4B2M1AG2Y6
         :param session_context: String - Name of the Application. Controls "Context" column in Arc / TM1top.
                 If None, use default: TM1py
@@ -112,8 +107,6 @@ class RestService:
         :param timeout: Float - Number of seconds that the client will wait to receive the first byte.
         :param cancel_at_timeout: Abort operation in TM1 when timeout is reached
         :param async_requests_mode: changes internal REST execution mode to avoid 60s timeout on IBM cloud
-        :param tcp_keepalive: maintain the TCP connection all the time, users should choose either async_requests_mode or tcp_keepalive to run a long-run request
-                If both are True, use async_requests_mode by default
         :param connection_pool_size - In a multi threaded environment, you should set this value to a
                 higher number, such as the number of threads
         :param integrated_login: True for IntegratedSecurityMode3
@@ -129,6 +122,9 @@ class RestService:
         :param re_connect_on_session_timeout: attempt to reconnect once if session is timed out
         :param proxies: pass a dictionary with proxies e.g.
                 {'http': 'http://proxy.example.com:8080', 'https': 'http://secureproxy.example.com:8090'}
+        :param ssl_context: Pass a user defined ssl context
+        :param cert: (optional) If String, path to SSL client cert file (.pem).
+                If Tuple, ('cert', 'key') pair
         """
         # store kwargs for future use e.g. re_connect on 401 session timeout
         self._kwargs = kwargs
@@ -144,15 +140,15 @@ class RestService:
         self._api_key = kwargs.get('api_key', None)
         self._iam_url = kwargs.get('iam_url', None)
         self._pa_url = kwargs.get('pa_url', None)
+        self._cpd_url = kwargs.get('cpd_url', None)
         self._tenant = kwargs.get('tenant', None)
+        self._user = kwargs.get('user', None)
 
         # other arguments
         self._auth_mode = self._determine_auth_mode()
         self._timeout = None if kwargs.get('timeout', None) is None else float(kwargs.get('timeout'))
         self._cancel_at_timeout = kwargs.get('cancel_at_timeout', False)
         self._async_requests_mode = self.translate_to_boolean(kwargs.get('async_requests_mode', False))
-        # Set tcp_keepalive to False explicitly to turn it off when async_requests_mode is enabled
-        self._tcp_keepalive = self._determine_tcp_keepalive(kwargs.get('tcp_keepalive', False))
         self._connection_pool_size = kwargs.get('connection_pool_size', self.DEFAULT_CONNECTION_POOL_SIZE)
         self._re_connect_on_session_timeout = kwargs.get('re_connect_on_session_timeout', True)
         # is retrieved on demand and then cached
@@ -161,21 +157,18 @@ class RestService:
         self.handle_logging(kwargs.get('logging', False))
 
         self._proxies = self._handle_proxies(kwargs.get('proxies', None))
+        self._is_admin = None
+        self._is_data_admin = None
+        self._is_security_admin = None
+        self._is_ops_admin = None
+        self._ssl_context = kwargs.get('ssl_context', None)
 
         # populated later on the fly for users with the name different from 'Admin'
-        self._is_admin = self._determine_is_admin(kwargs.get('user', None))
-
-        # populated on the fly
-        if kwargs.get('user'):
-            self._is_admin = True if case_and_space_insensitive_equals(kwargs.get('user'), 'ADMIN') else None
-            self._is_data_admin = True if case_and_space_insensitive_equals(kwargs.get('user'), 'ADMIN') else None
-            self._is_security_admin = True if case_and_space_insensitive_equals(kwargs.get('user'), 'ADMIN') else None
-            self._is_ops_admin = True if case_and_space_insensitive_equals(kwargs.get('user'), 'ADMIN') else None
-        else:
-            self._is_admin = None
-            self._is_data_admin = None
-            self._is_security_admin = None
-            self._is_ops_admin = None
+        if self._user and case_and_space_insensitive_equals(self._user, 'ADMIN'):
+            self._is_admin = True
+            self._is_data_admin = True
+            self._is_security_admin = True
+            self._is_ops_admin = True
 
         self._verify = self._determine_verify(kwargs.get('verify', None))
 
@@ -189,6 +182,11 @@ class RestService:
         self.disable_http_warnings()
 
         self._s = Session()
+        self._manage_http_adapter()
+
+        self._cert = kwargs.get("cert")
+        self._s.cert = self._cert
+
         if self._proxies:
             self._s.proxies = self._proxies
 
@@ -197,21 +195,15 @@ class RestService:
         if not self._version:
             self.set_version()
 
-        self._manage_http_adapter()
-
-    def _determine_is_admin(self, user: [None, str]) -> [None, bool]:
-        if user is None:
-            return None
-
-        return True if case_and_space_insensitive_equals(user, 'ADMIN') else None
-
-    def _determine_tcp_keepalive(self, tcp_keepalive: bool):
-        return self.translate_to_boolean(tcp_keepalive) if self._async_requests_mode is not True else False
-
     def _determine_verify(self, verify: [bool, str] = None) -> [bool, str]:
         if verify is None:
             # Default SSL verification in v12 is True
-            if self._auth_mode in [AuthenticationMode.IBM_CLOUD_API_KEY, AuthenticationMode.SERVICE_TO_SERVICE]:
+            if self._auth_mode in [
+                AuthenticationMode.IBM_CLOUD_API_KEY,
+                AuthenticationMode.SERVICE_TO_SERVICE,
+                AuthenticationMode.BASIC_API_KEY,
+                AuthenticationMode.ACCESS_TOKEN
+            ]:
                 return True
             else:
                 return False
@@ -266,6 +258,8 @@ class RestService:
             data=data,
             encoding=encoding)
 
+        timeout = timeout if timeout else self._timeout
+
         try:
             if return_async_id:
                 async_requests_mode = True
@@ -282,12 +276,13 @@ class RestService:
                                                **kwargs)
 
             else:
-                additional_header = {'Prefer': 'respond-async'}
+                additional_header = {'Prefer': f'respond-async'}
                 http_headers = kwargs.get('headers', dict())
                 http_headers.update(additional_header)
                 kwargs['headers'] = http_headers
                 response = self._s.request(method=method, url=url, data=data, verify=self._verify, timeout=timeout,
                                            **kwargs)
+
                 # reconnect in case of session timeout
                 if self._re_connect_on_session_timeout and response.status_code == 401:
                     self.connect()
@@ -301,7 +296,7 @@ class RestService:
                 if return_async_id:
                     return async_id
 
-                for wait in RestService.wait_time_generator(kwargs.get('timeout', self._timeout)):
+                for wait in RestService.wait_time_generator(timeout):
                     response = self.retrieve_async_response(async_id)
                     if response.status_code in [200, 201]:
                         break
@@ -331,21 +326,21 @@ class RestService:
         except Timeout:
             if cancel_at_timeout or (cancel_at_timeout is None and self._cancel_at_timeout):
                 self.cancel_running_operation()
-            raise TM1pyTimeout(method=method, url=url, timeout=kwargs.get('timeout', self._timeout))
+            raise TM1pyTimeout(method=method, url=url, timeout=timeout)
 
         except ConnectionError as e:
             # cater for issue in requests library: https://github.com/psf/requests/issues/5430
             if re.search('Read timed out', str(e), re.IGNORECASE):
                 if cancel_at_timeout or (cancel_at_timeout is None and self._cancel_at_timeout):
                     self.cancel_running_operation()
-                raise TM1pyTimeout(method=method, url=url, timeout=kwargs.get('timeout', self._timeout))
+                raise TM1pyTimeout(method=method, url=url, timeout=timeout)
 
             # A connection error that requires attention (e.g. SSL)
             raise e
 
     def connect(self):
         if "session_id" in self._kwargs:
-            self._s.cookies.set("TM1SessionId", self._kwargs["session_id"])
+            self._set_session_id_cookie()
         else:
             self._start_session(
                 user=self._kwargs.get("user", None),
@@ -363,6 +358,12 @@ class RestService:
                 application_client_id=self._kwargs.get("application_client_id", None),
                 application_client_secret=self._kwargs.get("application_client_secret", None))
 
+    def _set_session_id_cookie(self):
+        if self._auth_mode.use_v12_auth:
+            self._s.cookies.set("paSession", self._kwargs["session_id"])
+        else:
+            self._s.cookies.set("TM1SessionId", self._kwargs["session_id"])
+
     def _construct_ibm_cloud_service_and_auth_root(self):
         if not all([self._address, self._tenant, self._database]):
             raise ValueError("'address', 'tenant' and 'database' must be provided to connect to TM1 > v12 in IBM Cloud")
@@ -372,6 +373,21 @@ class RestService:
 
         base_url = f"https://{self._address}/api/{self._tenant}/v0/tm1/{self._database}"
         auth_url = f"{base_url}/Configuration/ProductVersion/$value"
+
+        return base_url, auth_url
+
+    def _construct_pa_proxy_service_and_auth_root(self) -> Tuple[str, str]:
+        if not all([self._address, self._database]):
+            raise ValueError("'address' and 'database' must be provided to connect to TM1 > v12 using PA Proxy")
+
+        base_url = "http{}://{}/tm1/{}/api/v1".format(
+            's' if self._ssl else '',
+            self._address,
+            self._database)
+
+        auth_url = "http{}://{}/login".format(
+            's' if self._ssl else '',
+            self._address)
 
         return base_url, auth_url
 
@@ -440,44 +456,36 @@ class RestService:
         if self._auth_mode is AuthenticationMode.IBM_CLOUD_API_KEY:
             return self._construct_ibm_cloud_service_and_auth_root()
 
+        if self._auth_mode is AuthenticationMode.PA_PROXY:
+            return self._construct_pa_proxy_service_and_auth_root()
+
         # If an address and database and instances are specified then we create a CP4D connection
         elif self._auth_mode is AuthenticationMode.SERVICE_TO_SERVICE:
             return self._construct_s2s_service_and_auth_root()
 
+        if self._auth_mode in [AuthenticationMode.BASIC_API_KEY, AuthenticationMode.ACCESS_TOKEN]:
+            return self._construct_all_version_service_and_auth_root_from_base_url()
+
     def _manage_http_adapter(self):
-        if self._tcp_keepalive:
-            # SO_KEEPALIVE: set 1 to enable TCP keepalive
-            socket_options = urllib3.connection.HTTPConnection.default_socket_options + [
-                (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-                (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, self.TCP_SOCKET_OPTIONS['TCP_KEEPIDLE']),
-                (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, self.TCP_SOCKET_OPTIONS['TCP_KEEPINTVL']),
-                (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, self.TCP_SOCKET_OPTIONS['TCP_KEEPCNT'])]
-
-            if self._connection_pool_size is not None:
-                adapter = HTTPAdapterWithSocketOptions(
-                    pool_connections=int(self._connection_pool_size),
-                    pool_maxsize=int(self._connection_pool_size),
-                    socket_options=socket_options)
-            else:
-                adapter = HTTPAdapterWithSocketOptions(socket_options=socket_options)
-
-        else:
-            adapter = HTTPAdapterWithSocketOptions(
-                pool_connections=int(self._connection_pool_size or self.DEFAULT_CONNECTION_POOL_SIZE),
-                pool_maxsize=int(self._connection_pool_size))
-
+        adapter = HTTPAdapterWithSocketOptions(
+            pool_connections=int(self._connection_pool_size or self.DEFAULT_CONNECTION_POOL_SIZE),
+            pool_maxsize=int(self._connection_pool_size),
+            ssl_context=self._ssl_context)
         self._s.mount(self._base_url, adapter)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exception_type, exception_value, traceback):
-        self.logout()
+        try:
+            self.logout()
+        except Exception as e:
+            warnings.warn(f"Logout Failed due to Exception: {e}")
 
     def GET(
             self,
             url: str,
-            data: Union[str, bytes] = '',
+            data: Union[str, bytes, BytesIO] = '',
             headers: Dict = None,
             async_requests_mode: bool = None,
             return_async_id: bool = False,
@@ -499,7 +507,7 @@ class RestService:
 
         return self.request(
             method='get',
-            headers={**self._headers, **headers} if headers else self._headers,
+            headers={**self._headers, **headers} if headers else dict(self._headers),
             url=url,
             data=data,
             async_requests_mode=async_requests_mode,
@@ -512,7 +520,7 @@ class RestService:
     def POST(
             self,
             url: str,
-            data: Union[str, bytes] = '',
+            data: Union[str, bytes, BytesIO] = '',
             headers: Dict = None,
             async_requests_mode: bool = None,
             return_async_id: bool = False,
@@ -534,7 +542,7 @@ class RestService:
 
         response = self.request(
             method='post',
-            headers={**self._headers, **headers} if headers else self._headers,
+            headers={**self._headers, **headers} if headers else dict(self._headers),
             url=url,
             data=data,
             async_requests_mode=async_requests_mode,
@@ -549,7 +557,7 @@ class RestService:
     def PATCH(
             self,
             url: str,
-            data: Union[str, bytes] = '',
+            data: Union[str, bytes, BytesIO] = '',
             headers: Dict = None,
             async_requests_mode: bool = None,
             return_async_id: bool = False,
@@ -571,7 +579,7 @@ class RestService:
 
         return self.request(
             method='patch',
-            headers={**self._headers, **headers} if headers else self._headers,
+            headers={**self._headers, **headers} if headers else dict(self._headers),
             url=url,
             data=data,
             async_requests_mode=async_requests_mode,
@@ -584,7 +592,7 @@ class RestService:
     def PUT(
             self,
             url: str,
-            data: Union[str, bytes] = '',
+            data: Union[str, bytes, BytesIO] = '',
             headers: Dict = None,
             async_requests_mode: bool = None,
             return_async_id: bool = False,
@@ -606,7 +614,7 @@ class RestService:
 
         return self.request(
             method='put',
-            headers={**self._headers, **headers} if headers else self._headers,
+            headers={**self._headers, **headers} if headers else dict(self._headers),
             url=url,
             data=data,
             async_requests_mode=async_requests_mode,
@@ -619,7 +627,7 @@ class RestService:
     def DELETE(
             self,
             url: str,
-            data: Union[str, bytes] = '',
+            data: Union[str, bytes, BytesIO] = '',
             headers: Dict = None,
             async_requests_mode: bool = None,
             return_async_id: bool = False,
@@ -641,7 +649,7 @@ class RestService:
 
         return self.request(
             method='delete',
-            headers={**self._headers, **headers} if headers else self._headers,
+            headers={**self._headers, **headers} if headers else dict(self._headers),
             url=url,
             data=data,
             async_requests_mode=async_requests_mode,
@@ -654,14 +662,10 @@ class RestService:
     def logout(self, timeout: float = None, **kwargs):
         """ End TM1 Session and HTTP session
         """
-        # Easier to ask for forgiveness than permission
+
         try:
-            # ProductVersion >= TM1 10.2.2 FP 6
             self.POST('/ActiveSession/tm1.Close', '', headers={"Connection": "close"}, timeout=timeout,
                       async_requests_mode=False, **kwargs)
-        except TM1pyRestException:
-            # ProductVersion < TM1 10.2.2 FP 6
-            self.POST('/api/logout', '', headers={"Connection": "close"}, timeout=timeout, **kwargs)
         finally:
             self._s.close()
 
@@ -696,9 +700,17 @@ class RestService:
             application_auth = HTTPBasicAuth(application_client_id, application_client_secret)
             self._s.auth = application_auth
 
+        # Get the JWT token from the CPD URL
+        elif self._auth_mode == AuthenticationMode.PA_PROXY:
+            credentials = {"username": user, "password": password}
+            jwt = self._generate_cpd_access_token(credentials)
+
         elif self._auth_mode == AuthenticationMode.IBM_CLOUD_API_KEY:
             access_token = self._generate_ibm_iam_cloud_access_token()
             self.add_http_header('Authorization', "Bearer " + access_token)
+
+        elif self._auth_mode == AuthenticationMode.ACCESS_TOKEN:
+            self.add_http_header('Authorization', "Bearer " + self._kwargs.get('access_token'))
 
         # v11 authorization (Basic, CAM) through Headers
         else:
@@ -708,7 +720,8 @@ class RestService:
                 namespace,
                 gateway,
                 cam_passport,
-                self._verify)
+                self._verify,
+                self._cert)
             self.add_http_header('Authorization', token)
 
         # process additional headers
@@ -742,7 +755,18 @@ class RestService:
                             "using this TM1Service will use the session id extracted from the first response "
                             "Check the tm1-gateway domain settings are correct"
                             "in the container orchestrator ")
-
+                elif self._auth_mode == AuthenticationMode.PA_PROXY:
+                    header = {'Content-Type': 'application/x-www-form-urlencoded'}
+                    payload = f"jwt={jwt}"
+                    response = self._s.post(
+                        url=self._auth_url,
+                        headers=header,
+                        verify=self._verify,
+                        timeout=self._timeout,
+                        data=payload)
+                    self.verify_response(response)
+                    csrf_cookie = response.cookies.get_dict(self._address, '/')['ba-sso-csrf']
+                    self.add_http_header('ba-sso-authenticity', csrf_cookie)
                 else:
                     response = self._s.get(
                         url=self._auth_url,
@@ -759,15 +783,21 @@ class RestService:
                 raise ValueError(f"No response returned from URL: '{self._auth_url}'. "
                                  f"Please double check your address and port number in the URL.")
 
-
         finally:
+            # If the TM1 REST API is routed through a reverse proxy that alters the expected URL,
+            # we explicitly re-set the 'TM1SessionId' cookie to maintain session continuity.
+            session_id = self._s.cookies.pop('TM1SessionId', None)
+            if session_id is not None:
+                self._s.cookies.set('TM1SessionId', session_id)
+
             # After we have session cookie, drop the Authorization Header
             self.remove_http_header('Authorization')
 
     def _url_and_body(self, url: str, data: str, encoding: str = 'utf-8') -> Tuple[str, bytes]:
         """ create proper url and payload
         """
-        url = self._base_url + url
+        # drop leading '/api/v1' from URL for backwards compatibility
+        url = self._base_url + (url[len("/api/v1"):] if url.startswith("/api/v1") else url)
         url = url.replace(' ', '%20')
         if isinstance(data, str):
             data = data.encode(encoding)
@@ -828,7 +858,7 @@ class RestService:
                 *[group["Name"] for group in response.json()["value"]]) for g in ["Admin", "SecurityAdmin"])
 
         return self._is_security_admin
-    
+
     @property
     def is_ops_admin(self) -> bool:
         if self._is_ops_admin is None:
@@ -837,7 +867,7 @@ class RestService:
                 *[group["Name"] for group in response.json()["value"]]) for g in ["Admin", "OperationsAdmin"])
 
         return self._is_ops_admin
-    
+
     @property
     def sandboxing_disabled(self):
         if self._sandboxing_disabled is None:
@@ -892,19 +922,21 @@ class RestService:
 
     @staticmethod
     def _build_authorization_token(user: str, password: str, namespace: str = None, gateway: str = None,
-                                   cam_passport: str = None, verify: bool = False) -> str:
+                                   cam_passport: str = None, verify: bool = False,
+                                   cert: Optional[Union[str, Tuple[str, str]]] = None) -> str:
         """ Build the Authorization Header for CAM and Native Security
         """
         if cam_passport:
             return 'CAMPassport ' + cam_passport
         elif namespace:
-            return RestService._build_authorization_token_cam(user, password, namespace, gateway, verify)
+            return RestService._build_authorization_token_cam(user, password, namespace, gateway, verify, cert)
         else:
             return RestService._build_authorization_token_basic(user, password)
 
     @staticmethod
     def _build_authorization_token_cam(user: str = None, password: str = None, namespace: str = None,
-                                       gateway: str = None, verify: bool = False) -> str:
+                                       gateway: str = None, verify: bool = False,
+                                       cert: Optional[Union[str, Tuple[str, str]]] = None) -> str:
         if gateway:
             try:
                 HttpNegotiateAuth
@@ -912,7 +944,7 @@ class RestService:
                 raise RuntimeError(
                     "SSO failed due to missing dependency requests_negotiate_sspi.HttpNegotiateAuth. "
                     "SSO only supported for Windows")
-            response = requests.get(gateway, auth=HttpNegotiateAuth(), verify=verify,
+            response = requests.get(gateway, auth=HttpNegotiateAuth(), verify=verify, cert=cert,
                                     params={"CAMNamespace": namespace})
             if not response.status_code == 200:
                 raise RuntimeError(
@@ -1044,8 +1076,15 @@ class RestService:
             self._pa_url,
             self._tenant
         ]):
-            # v11
-            if not any([self._kwargs.get('namespace', None), self._kwargs.get('gateway', None)]):
+            if not any([
+                self._kwargs.get('namespace', None),
+                self._kwargs.get('gateway', None),
+                self._kwargs.get('integrated_login', None)
+            ]):
+                if self._kwargs.get('user', None) == 'apikey' and 'planninganalytics.saas.ibm.com' in self._base_url:
+                    return AuthenticationMode.BASIC_API_KEY
+                elif self._kwargs.get('access_token'):
+                    return AuthenticationMode.ACCESS_TOKEN
                 return AuthenticationMode.BASIC
 
             if self._kwargs.get('gateway', None):
@@ -1060,7 +1099,19 @@ class RestService:
         if self._iam_url:
             return AuthenticationMode.IBM_CLOUD_API_KEY
 
+        if self._address and self._user and not self._instance:
+            return AuthenticationMode.PA_PROXY
+
         return AuthenticationMode.SERVICE_TO_SERVICE
+
+    def _generate_cpd_access_token(self, credentials) -> str:
+        if not all([self._cpd_url]):
+            raise ValueError('cpd_url must be provided to authenticate via PA Proxy')
+        url = f"{self._cpd_url}/v1/preauth/signin"
+        headers = {'Content-Type': 'application/json;charset=UTF-8'}
+        response = requests.request("POST", url, headers=headers, json=credentials, verify=self._verify)
+        jwt = literal_eval(response.content.decode('utf8'))
+        return jwt['token']
 
     def _generate_ibm_iam_cloud_access_token(self) -> str:
         if not all([self._iam_url, self._api_key]):

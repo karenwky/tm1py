@@ -51,7 +51,7 @@ class ProcessService(ObjectService):
         return Process.from_dict(response.json())
 
     def get_all(self, skip_control_processes: bool = False, **kwargs) -> List[Process]:
-        """ Get a processes from TM1 Server
+        """ Get all processes from TM1 Server
     
         :param skip_control_processes: bool, True to exclude processes that begin with "}" or "{"
         :return: List, instances of the TM1py.Process
@@ -264,12 +264,13 @@ class ProcessService(ObjectService):
 
     @require_version(version="11.3")
     def execute_process_with_return(self, process: Process, timeout: float = None, cancel_at_timeout: bool = False,
-                                    **kwargs) -> Tuple[bool, str, str]:
+                                    return_async_id: bool = False, **kwargs) -> Tuple[bool, str, str]:
         """Run unbound TI code directly.
 
         :param process: a TI Process Object
         :param timeout: Number of seconds that the client will wait to receive the first byte.
         :param cancel_at_timeout: Abort operation in TM1 when timeout is reached
+        :param return_async_id: return async_id instead of (success, status, error_log_file)
         :param kwargs: dictionary of process parameters and values
         :return: success (boolean), status (String), error_log_file (String)
         """
@@ -288,7 +289,11 @@ class ProcessService(ObjectService):
             data=json.dumps(payload, ensure_ascii=False),
             timeout=timeout,
             cancel_at_timeout=cancel_at_timeout,
+            return_async_id=return_async_id,
             **kwargs)
+
+        if return_async_id:
+            return response
 
         return self._execute_with_return_parse_response(response)
 

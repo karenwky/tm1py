@@ -2,23 +2,18 @@ import configparser
 import copy
 import unittest
 from pathlib import Path
+from uuid import uuid1
+
+from mdxpy import MdxBuilder
 
 from TM1py.Exceptions import TM1pyRestException, TM1pyException
 from TM1py.Objects import Dimension, Hierarchy, Element, ElementAttribute
 from TM1py.Services import TM1Service
-from Tests.Utils import skip_if_no_pandas
+from Tests.Utils import skip_if_version_lower_than, skip_if_no_pandas
 
 
 class TestElementService(unittest.TestCase):
     tm1: TM1Service
-
-    prefix = 'TM1py_unittest_element'
-    dimension_name = f"{prefix}_dimension"
-    dimension_with_hierarchies_name = f"{prefix}_dimension_with_hierarchies"
-    hierarchy_name = dimension_name
-    attribute_cube_name = '}ElementAttributes_' + dimension_name
-    dimension_does_not_exist_name = f"{prefix}_dimension_does_not_exist"
-    hierarchy_does_not_exist_name = dimension_does_not_exist_name
 
     @classmethod
     def setUpClass(cls):
@@ -31,57 +26,65 @@ class TestElementService(unittest.TestCase):
         cls.config.read(Path(__file__).parent.joinpath('config.ini'))
         cls.tm1 = TM1Service(**cls.config['tm1srv01'])
 
-    @classmethod
-    def setUp(cls):
+    def setUp(self):
+        dimension_uuid = str(uuid1()).replace('-', "_")
+        prefix = 'TM1py_unittest_element'
+        pure_dimension_name = f"{prefix}_dimension_{dimension_uuid}"
+
+        self.dimension_name = pure_dimension_name
+        self.dimension_with_hierarchies_name = pure_dimension_name + '_with_hierarchies'
+        self.hierarchy_name = pure_dimension_name
+        self.attribute_cube_name = '}ElementAttributes_' + pure_dimension_name
+        self.dimension_does_not_exist_name = pure_dimension_name + "_does_not_exist"
+        self.hierarchy_does_not_exist_name = self.dimension_does_not_exist_name
+
         # create dimension with a default hierarchy
-        d = Dimension(cls.dimension_name)
-        h = Hierarchy(cls.dimension_name, cls.hierarchy_name)
+        d = Dimension(self.dimension_name)
+        h = Hierarchy(self.dimension_name, self.hierarchy_name)
 
         # add elements
-        cls.years = ("No Year", "1989", "1990", "1991", "1992")
-        cls.extra_year = "4321"
+        self.years = ("No Year", "1989", "1990", "1991", "1992")
+        self.extra_year = "4321"
 
         h.add_element('Total Years', 'Consolidated')
         h.add_element('All Consolidations', 'Consolidated')
         h.add_edge("All Consolidations", "Total Years", 1)
-        for year in cls.years:
+        for year in self.years:
             h.add_element(year, 'Numeric')
             h.add_edge('Total Years', year, 1)
 
         # add attributes
-        cls.attributes = ('Previous Year', 'Next Year')
-        cls.alias_attributes = ("Financial Year",)
+        self.attributes = ('Previous Year', 'Next Year')
+        self.alias_attributes = ("Financial Year",)
 
-        for attribute in cls.attributes:
+        for attribute in self.attributes:
             h.add_element_attribute(attribute, "String")
-        for attribute in cls.alias_attributes:
+        for attribute in self.alias_attributes:
             h.add_element_attribute(attribute, "Alias")
         d.add_hierarchy(h)
-        cls.tm1.dimensions.update_or_create(d)
+        self.tm1.dimensions.update_or_create(d)
 
-        cls.added_attribute_name = "NewAttribute"
+        self.added_attribute_name = "NewAttribute"
 
         # write attribute values
-        cls.tm1.cubes.cells.write_value('1988', cls.attribute_cube_name, ('1989', 'Previous Year'))
-        cls.tm1.cubes.cells.write_value('1989', cls.attribute_cube_name, ('1990', 'Previous Year'))
-        cls.tm1.cubes.cells.write_value('1990', cls.attribute_cube_name, ('1991', 'Previous Year'))
-        cls.tm1.cubes.cells.write_value('1991', cls.attribute_cube_name, ('1992', 'Previous Year'))
+        self.tm1.cubes.cells.write_value('1988', self.attribute_cube_name, ('1989', 'Previous Year'))
+        self.tm1.cubes.cells.write_value('1989', self.attribute_cube_name, ('1990', 'Previous Year'))
+        self.tm1.cubes.cells.write_value('1990', self.attribute_cube_name, ('1991', 'Previous Year'))
+        self.tm1.cubes.cells.write_value('1991', self.attribute_cube_name, ('1992', 'Previous Year'))
 
-        cls.tm1.cubes.cells.write_value('1988/89', cls.attribute_cube_name, ('1989', 'Financial Year'))
-        cls.tm1.cubes.cells.write_value('1989/90', cls.attribute_cube_name, ('1990', 'Financial Year'))
-        cls.tm1.cubes.cells.write_value('1990/91', cls.attribute_cube_name, ('1991', 'Financial Year'))
-        cls.tm1.cubes.cells.write_value('1991/92', cls.attribute_cube_name, ('1992', 'Financial Year'))
+        self.tm1.cubes.cells.write_value('1988/89', self.attribute_cube_name, ('1989', 'Financial Year'))
+        self.tm1.cubes.cells.write_value('1989/90', self.attribute_cube_name, ('1990', 'Financial Year'))
+        self.tm1.cubes.cells.write_value('1990/91', self.attribute_cube_name, ('1991', 'Financial Year'))
+        self.tm1.cubes.cells.write_value('1991/92', self.attribute_cube_name, ('1992', 'Financial Year'))
 
-        cls.create_or_update_dimension_with_hierarchies()
+        self.create_or_update_dimension_with_hierarchies()
 
-    @classmethod
-    def tearDown(cls):
-        cls.tm1.dimensions.delete(cls.dimension_name)
-        cls.tm1.dimensions.delete(cls.dimension_with_hierarchies_name)
+    def tearDown(self):
+        self.tm1.dimensions.delete(self.dimension_name)
+        self.tm1.dimensions.delete(self.dimension_with_hierarchies_name)
 
-    @classmethod
-    def create_or_update_dimension_with_hierarchies(cls):
-        dimension = Dimension(cls.dimension_with_hierarchies_name)
+    def create_or_update_dimension_with_hierarchies(self):
+        dimension = Dimension(self.dimension_with_hierarchies_name)
         dimension.add_hierarchy(
             Hierarchy(
                 name="Hierarchy1",
@@ -102,7 +105,7 @@ class TestElementService(unittest.TestCase):
                           Element("Cons3", "Consolidated")],
                 edges={("Cons3", "Elem5"): 1}),
         )
-        cls.tm1.dimensions.update_or_create(dimension)
+        self.tm1.dimensions.update_or_create(dimension)
 
     def test_create_and_delete_element(self):
         element = Element(self.extra_year, "String")
@@ -219,8 +222,7 @@ class TestElementService(unittest.TestCase):
             self.assertIn(year, element_names)
         self.assertNotIn(self.extra_year, element_names)
 
-    @skip_if_no_pandas
-    def test_get_elements_dataframe(self):
+    def run_test_get_elements_dataframe(self, use_blob: bool):
         df = self.tm1.elements.get_elements_dataframe(
             dimension_name=self.dimension_name,
             hierarchy_name=self.hierarchy_name,
@@ -231,10 +233,11 @@ class TestElementService(unittest.TestCase):
             skip_parents=False,
             level_names=None,
             parent_attribute=None,
-            skip_weights=False)
+            skip_weights=False,
+            use_blob=use_blob)
 
         expected_columns = (
-            "TM1py_unittest_element_dimension",
+            self.dimension_name,
             "Type",
             "Attribute Next Year",
             "Attribute Previous Year",
@@ -252,7 +255,14 @@ class TestElementService(unittest.TestCase):
         )
 
     @skip_if_no_pandas
-    def test_get_elements_dataframe_not_allow_empty_alias(self):
+    def test_get_elements_dataframe(self):
+        self.run_test_get_elements_dataframe(use_blob=False)
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_use_blob(self):
+        self.run_test_get_elements_dataframe(use_blob=True)
+
+    def run_test_get_elements_dataframe_not_allow_empty_alias(self, use_blob):
         df = self.tm1.elements.get_elements_dataframe(
             dimension_name=self.dimension_name,
             hierarchy_name=self.hierarchy_name,
@@ -263,10 +273,11 @@ class TestElementService(unittest.TestCase):
             level_names=None,
             parent_attribute=None,
             skip_weights=False,
-            allow_empty_alias=False)
+            allow_empty_alias=False,
+            use_blob=use_blob)
 
         expected_columns = (
-            "TM1py_unittest_element_dimension",
+            self.dimension_name,
             "Type",
             "Financial Year",
             "Previous Year",
@@ -285,7 +296,14 @@ class TestElementService(unittest.TestCase):
         )
 
     @skip_if_no_pandas
-    def test_get_elements_dataframe_allow_empty_alias(self):
+    def test_get_elements_dataframe_not_allow_empty_alias(self):
+        self.run_test_get_elements_dataframe_not_allow_empty_alias(use_blob=False)
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_not_allow_empty_alias_use_blob(self):
+        self.run_test_get_elements_dataframe_not_allow_empty_alias(use_blob=True)
+
+    def run_test_get_elements_dataframe_allow_empty_alias(self, use_blob):
         df = self.tm1.elements.get_elements_dataframe(
             dimension_name=self.dimension_name,
             hierarchy_name=self.hierarchy_name,
@@ -296,10 +314,11 @@ class TestElementService(unittest.TestCase):
             level_names=None,
             parent_attribute=None,
             skip_weights=False,
-            allow_empty_alias=True)
+            allow_empty_alias=True,
+            use_blob=use_blob)
 
         expected_columns = (
-            "TM1py_unittest_element_dimension",
+            self.dimension_name,
             "Type",
             "Financial Year",
             "Previous Year",
@@ -318,7 +337,14 @@ class TestElementService(unittest.TestCase):
         )
 
     @skip_if_no_pandas
-    def test_get_elements_dataframe_not_allow_empty_alias_mixed_source(self):
+    def test_get_elements_dataframe_allow_empty_alias(self):
+        self.run_test_get_elements_dataframe_allow_empty_alias(use_blob=False)
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_allow_empty_alias_use_blob(self):
+        self.run_test_get_elements_dataframe_allow_empty_alias(use_blob=True)
+
+    def run_test_get_elements_dataframe_not_allow_empty_alias_mixed_source(self, use_blob):
         df = self.tm1.elements.get_elements_dataframe(
             dimension_name=self.dimension_name,
             hierarchy_name=self.hierarchy_name,
@@ -329,10 +355,11 @@ class TestElementService(unittest.TestCase):
             level_names=None,
             parent_attribute=None,
             skip_weights=False,
-            allow_empty_alias=False)
+            allow_empty_alias=False,
+            use_blob=use_blob)
 
         expected_columns = (
-            "TM1py_unittest_element_dimension",
+            self.dimension_name,
             "Type",
             "Financial Year",
             "Previous Year",
@@ -357,7 +384,14 @@ class TestElementService(unittest.TestCase):
         )
 
     @skip_if_no_pandas
-    def test_get_elements_dataframe_alternate_hierarchy(self):
+    def test_get_elements_dataframe_not_allow_empty_alias_mixed_source(self):
+        self.run_test_get_elements_dataframe_not_allow_empty_alias_mixed_source(False)
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_not_allow_empty_alias_mixed_source_use_blob(self):
+        self.run_test_get_elements_dataframe_not_allow_empty_alias_mixed_source(True)
+
+    def run_test_get_elements_dataframe_alternate_hierarchy(self, use_blob):
         df = self.tm1.elements.get_elements_dataframe(
             dimension_name=self.dimension_with_hierarchies_name,
             hierarchy_name="Hierarchy3",
@@ -367,7 +401,8 @@ class TestElementService(unittest.TestCase):
             skip_parents=False,
             level_names=None,
             parent_attribute=None,
-            skip_weights=False)
+            skip_weights=False,
+            use_blob=use_blob)
 
         expected_columns = (
             self.dimension_with_hierarchies_name,
@@ -382,6 +417,212 @@ class TestElementService(unittest.TestCase):
             ('Elem5', 'Numeric', '1.000000', 'Cons3'),
             tuple(row.values[0])
         )
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_alternate_hierarchy(self):
+        self.run_test_get_elements_dataframe_alternate_hierarchy(use_blob=False)
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_alternate_hierarchy_use_blob(self):
+        self.run_test_get_elements_dataframe_alternate_hierarchy(use_blob=True)
+
+    def run_test_get_elements_dataframe_attribute_suffix(self, use_blob):
+        df = self.tm1.elements.get_elements_dataframe(
+            dimension_name=self.dimension_name,
+            hierarchy_name=self.hierarchy_name,
+            elements=["1989", "1990"],
+            skip_consolidations=True,
+            attributes=["Next Year", "Previous Year"],
+            attribute_suffix=True,
+            skip_parents=False,
+            level_names=None,
+            parent_attribute=None,
+            skip_weights=False,
+            use_blob=use_blob)
+
+        expected_columns = (
+            self.dimension_name,
+            "Type",
+            "Next Year:s",
+            "Previous Year:s",
+            "level001_Weight",
+            "level000_Weight",
+            "level001",
+            "level000",)
+
+        self.assertEqual((2, 8), df.shape)
+        self.assertEqual(expected_columns, tuple(df.columns))
+        row = df.loc[df[self.dimension_name] == "1989"]
+        self.assertEqual(
+            ('1989', 'Numeric', '', '1988', '1.000000', '1.000000', 'Total Years', 'All Consolidations'),
+            tuple(row.values[0])
+        )
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_attribute_suffix(self):
+        self.run_test_get_elements_dataframe_attribute_suffix(False)
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_attribute_suffix_use_blob(self):
+        self.run_test_get_elements_dataframe_attribute_suffix(True)
+
+    def run_test_get_elements_dataframe_attribute_prefix_and_suffix(self, use_blob):
+        df = self.tm1.elements.get_elements_dataframe(
+            dimension_name=self.dimension_name,
+            hierarchy_name=self.hierarchy_name,
+            elements=["1989", "1990"],
+            skip_consolidations=True,
+            attributes=["Next Year", "Previous Year"],
+            attribute_column_prefix="A_",
+            attribute_suffix=True,
+            skip_parents=False,
+            level_names=None,
+            parent_attribute=None,
+            skip_weights=False,
+            use_blob=use_blob)
+
+        expected_columns = (
+            self.dimension_name,
+            "Type",
+            "A_Next Year:s",
+            "A_Previous Year:s",
+            "level001_Weight",
+            "level000_Weight",
+            "level001",
+            "level000",)
+
+        self.assertEqual((2, 8), df.shape)
+        self.assertEqual(expected_columns, tuple(df.columns))
+        row = df.loc[df[self.dimension_name] == "1989"]
+        self.assertEqual(
+            ('1989', 'Numeric', '', '1988', '1.000000', '1.000000', 'Total Years', 'All Consolidations'),
+            tuple(row.values[0])
+        )
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_attribute_prefix_and_suffix(self):
+        self.run_test_get_elements_dataframe_attribute_prefix_and_suffix(False)
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_attribute_prefix_and_suffix_use_blob(self):
+        self.run_test_get_elements_dataframe_attribute_prefix_and_suffix(True)
+
+    def run_test_get_elements_dataframe_element_type_column(self, use_blob):
+        df = self.tm1.elements.get_elements_dataframe(
+            dimension_name=self.dimension_name,
+            hierarchy_name=self.hierarchy_name,
+            elements=["1989", "1990"],
+            skip_consolidations=True,
+            attributes=["Next Year", "Previous Year"],
+            element_type_column="ElementType",
+            skip_parents=False,
+            level_names=None,
+            parent_attribute=None,
+            skip_weights=False,
+            use_blob=use_blob)
+
+        expected_columns = (
+            self.dimension_name,
+            "ElementType",
+            "Next Year",
+            "Previous Year",
+            "level001_Weight",
+            "level000_Weight",
+            "level001",
+            "level000",)
+
+        self.assertEqual((2, 8), df.shape)
+        self.assertEqual(expected_columns, tuple(df.columns))
+        row = df.loc[df[self.dimension_name] == "1989"]
+        self.assertEqual(
+            ('1989', 'Numeric', '', '1988', '1.000000', '1.000000', 'Total Years', 'All Consolidations'),
+            tuple(row.values[0])
+        )
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_element_type_column(self):
+        self.run_test_get_elements_dataframe_element_type_column(False)
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_element_type_column_use_blob(self):
+        self.run_test_get_elements_dataframe_element_type_column(True)
+
+    def run_test_get_elements_dataframe_not_elements(self, use_blob: bool):
+        df = self.tm1.elements.get_elements_dataframe(
+            dimension_name=self.dimension_name,
+            hierarchy_name=self.hierarchy_name,
+            skip_consolidations=True,
+            attributes=["Next Year", "Previous Year"],
+            attribute_column_prefix="Attribute ",
+            skip_parents=False,
+            level_names=None,
+            parent_attribute=None,
+            skip_weights=False,
+            use_blob=use_blob)
+
+        reference_df = self.tm1.elements.get_elements_dataframe(
+            dimension_name=self.dimension_name,
+            hierarchy_name=self.hierarchy_name,
+            elements=f"{{ [{self.dimension_name}].[{self.hierarchy_name}].Members }}",
+            skip_consolidations=True,
+            attributes=["Next Year", "Previous Year"],
+            attribute_column_prefix="Attribute ",
+            skip_parents=False,
+            level_names=None,
+            parent_attribute=None,
+            skip_weights=False,
+            use_blob=use_blob)
+
+        self.assertTrue(df.equals(reference_df))
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_not_elements(self):
+        self.run_test_get_elements_dataframe_not_elements(use_blob=False)
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_use_blob_not_elements(self):
+        self.run_test_get_elements_dataframe_not_elements(use_blob=True)
+
+    def run_test_get_elements_dataframe_elements_via_mdx(self, use_blob: bool):
+        element_names = self.tm1.elements.get_element_names(self.dimension_name, self.hierarchy_name)
+        df = self.tm1.elements.get_elements_dataframe(
+            dimension_name=self.dimension_name,
+            hierarchy_name=self.hierarchy_name,
+            elements=element_names,
+            skip_consolidations=True,
+            attributes=["Next Year", "Previous Year"],
+            attribute_column_prefix="Attribute ",
+            skip_parents=False,
+            level_names=None,
+            parent_attribute=None,
+            skip_weights=False,
+            use_blob=use_blob)
+
+        elements = "{" + ",".join(
+            f"[{self.dimension_name}].[{self.hierarchy_name}].[{member}]" for member in element_names) + "}"
+        reference_df = self.tm1.elements.get_elements_dataframe(
+            dimension_name=self.dimension_name,
+            hierarchy_name=self.hierarchy_name,
+            elements=elements,
+            skip_consolidations=True,
+            attributes=["Next Year", "Previous Year"],
+            attribute_column_prefix="Attribute ",
+            skip_parents=False,
+            level_names=None,
+            parent_attribute=None,
+            skip_weights=False,
+            use_blob=use_blob)
+
+        self.assertTrue(df.equals(reference_df))
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_not_elements(self):
+        self.run_test_get_elements_dataframe_not_elements(use_blob=False)
+
+    @skip_if_no_pandas
+    def test_get_elements_dataframe_use_blob_not_elements(self):
+        self.run_test_get_elements_dataframe_not_elements(use_blob=True)
+
 
     def test_get_element_names(self):
         element_names = self.tm1.dimensions.hierarchies.elements.get_element_names(
@@ -730,6 +971,31 @@ class TestElementService(unittest.TestCase):
             "1990",
             self.tm1.elements.get_element_names(self.dimension_name, self.hierarchy_name))
 
+
+    def test_delete_elements_use_blob(self):
+        self.assertIn(
+            "1989",
+            self.tm1.elements.get_element_names(self.dimension_name, self.hierarchy_name))
+
+        self.assertIn(
+            "1990",
+            self.tm1.elements.get_element_names(self.dimension_name, self.hierarchy_name))
+
+        element_names = ["1989", "1990"]
+        self.tm1.elements.delete_elements(
+            dimension_name=self.dimension_name,
+            hierarchy_name=self.hierarchy_name,
+            element_names=element_names,
+            use_blob=True
+        )
+        self.assertNotIn(
+            "1989",
+            self.tm1.elements.get_element_names(self.dimension_name, self.hierarchy_name))
+
+        self.assertNotIn(
+            "1990",
+            self.tm1.elements.get_element_names(self.dimension_name, self.hierarchy_name))
+
     def test_delete_element_attribute(self):
         element_attribute = ElementAttribute("NewAttribute", "String")
         self.tm1.dimensions.hierarchies.elements.create_element_attribute(
@@ -831,6 +1097,11 @@ class TestElementService(unittest.TestCase):
                 self.dimension_name,
                 [element_attribute])
 
+    def test_execute_set_mdx_element_names(self):
+        mdx = f"{{[{self.dimension_name}].[1990]}}"
+        members = self.tm1.elements.execute_set_mdx_element_names(mdx=mdx)
+        self.assertEqual(members, ['1990'])
+
     def test_execute_set_mdx(self):
         mdx = f"{{[{self.dimension_name}].[1990]}}"
         members = self.tm1.elements.execute_set_mdx(
@@ -863,6 +1134,28 @@ class TestElementService(unittest.TestCase):
             "All Consolidations": "Consolidated"
         }
         self.assertEqual(expected, element_types)
+
+    @skip_if_version_lower_than(version="11.8.023")
+    def test_element_lock_and_unlock(self):
+        self.tm1.elements.element_lock(dimension_name=self.dimension_name, 
+                                       hierarchy_name=self.hierarchy_name, 
+                                       element_name='1991')
+
+        query = MdxBuilder.from_cube(self.attribute_cube_name)
+        query.add_member_tuple_to_columns(
+            f"[{self.dimension_name}].[1991]",
+            f"[{self.attribute_cube_name}].[Previous Year]")
+
+        with self.assertRaises(TM1pyException):
+            self.tm1.cubes.cells.write_value('3000', self.attribute_cube_name, ('1991', 'Previous Year'))
+        self.assertEqual(self.tm1.cells.execute_mdx_values(mdx=query.to_mdx()), ['1990'])
+
+
+        self.tm1.elements.element_unlock(dimension_name=self.dimension_name, 
+                                       hierarchy_name=self.hierarchy_name, 
+                                       element_name='1991')
+        self.tm1.cubes.cells.write_value('4000', self.attribute_cube_name, ('1991', 'Previous Year'))
+        self.assertEqual(self.tm1.cells.execute_mdx_values(mdx=query.to_mdx()), ['4000'])
 
     def test_get_element_types_from_all_hierarchies_with_single_hierarchy(self):
         expected = {
@@ -920,6 +1213,18 @@ class TestElementService(unittest.TestCase):
 
         edges = self.tm1.elements.get_edges(self.dimension_name, self.dimension_name)
         self.assertNotIn(("Total Years", "1989"), edges)
+    
+    @skip_if_version_lower_than(version="11.4")
+    def test_delete_edges(self):
+        self.tm1.elements.delete_edges(
+            dimension_name=self.dimension_name,
+            hierarchy_name=self.hierarchy_name,
+            edges=[("Total Years", "1989"), ("Total Years", "1990")]
+        )
+
+        edges = self.tm1.elements.get_edges(self.dimension_name, self.dimension_name)
+        self.assertNotIn(("Total Years", "1989"), edges)
+        self.assertNotIn(("Total Years", "1990"), edges)
 
     def test_remove_edge_parent_not_existing(self):
         with self.assertRaises(TM1pyRestException):

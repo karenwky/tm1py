@@ -9,7 +9,7 @@ except ImportError:
 
 import json
 import math
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Iterable
 
 import networkx as nx
 from requests import Response
@@ -353,9 +353,10 @@ class HierarchyService(ObjectService):
         hierarchy = self.get(dimension_name, hierarchy_name)
         from TM1py.Services import ElementService
         element_service = ElementService(self._rest)
-        elements_under_consolidations = element_service.get_members_under_consolidation(dimension_name, hierarchy_name,
-                                                                                        consolidation_element)
-        elements_under_consolidations.append(consolidation_element)
+        elements_under_consolidations = CaseAndSpaceInsensitiveSet(
+            element_service.get_members_under_consolidation(dimension_name, hierarchy_name,
+                                                            consolidation_element))
+        elements_under_consolidations.add(consolidation_element)
         remove_edges = []
         for (parent, component) in hierarchy.edges:
             if parent in elements_under_consolidations and component in elements_under_consolidations:
@@ -427,7 +428,10 @@ class HierarchyService(ObjectService):
             verify_unique_elements: bool = False,
             verify_edges: bool = True,
             element_type_column: str = 'ElementType',
-            unwind: bool = False):
+            unwind_all: bool = False,
+            unwind_consolidations: Iterable = None,
+            update_attribute_types: bool = False,
+            **kwargs):
         """ Update or Create a hierarchy based on a dataframe, while never deleting existing elements.
 
         :param dimension_name:
@@ -453,12 +457,21 @@ class HierarchyService(ObjectService):
         :param verify_unique_elements:
             Abort early if element names are not unique
         :param verify_edges:
-            Abort early if edges have circular reference
-        :param unwind: bool
+            Abort early if edges contain a circular reference
+        :param unwind_all: bool
             Unwind hierarch before creating new edges
+        :param unwind_consolidations: list
+            Unwind a list of specific consolidations in the hierarchy before creating new edges,
+            if unwind_all is true, this list is ignored
+        :param update_attribute_types: bool
+            If True, function will delete and recreate attributes when a type change is requested.
+            By default, function will not delete attributes.
+
         :return:
 
         """
+        df = df.copy()
+
         # element ID is in first column if not specified.
         element_column = df.columns[0] if not element_column else element_column
         df[element_column] = df[element_column].astype(str)
@@ -478,15 +491,31 @@ class HierarchyService(ObjectService):
         if len(alias_columns) > 0:
             self._validate_alias_uniqueness(df=df[[element_column, *alias_columns]])
 
-        # identify level columns
+        # backward compatibility for unwind, the value for unwind would be assinged to unwind_all. expected type is bool
+        if "unwind" in kwargs:
+            unwind_all = kwargs["unwind"]
+
+        if unwind_consolidations:
+            if isinstance(unwind_consolidations, str) or not isinstance(unwind_consolidations, Iterable):
+                raise ValueError(
+                    f"value for 'unwind_consolidations' must be an iterable (e.g., list), "
+                    f"but received: '{unwind_consolidations}' of type {type(unwind_consolidations).__name__}"
+                )
+
+        # identify and sort level columns
         level_columns = []
         level_weight_columns = []
-        # sort to assure right order of levels
-        for column in sorted(df.columns, reverse=True):
+        # sort to assure right order of levels (e.g. Level003 -> level002 -> LEVEL001)
+        sorted_level_columns = sorted(
+            [col for col in df.columns if any(char.isdigit() for char in col)],  # Filter columns with digits
+            key=lambda x: int(''.join(filter(str.isdigit, x))),  # Sort based on numeric part
+            reverse=True  # Descending order
+        )
+        for column in sorted_level_columns:
             if column.lower().startswith('level') and column[5:8].isdigit():
-                if len(column) == 8:
+                if len(column) == 8:  # "LevelXXX"
                     level_columns.append(column)
-                elif len(column) == 15 and column.lower().endswith('_weight'):
+                elif len(column) == 15 and column.lower().endswith('_weight'):  # "LevelXXX_weight"
                     level_weight_columns.append(column)
 
         # case: no level weight columns. All weights are 1
@@ -505,7 +534,7 @@ class HierarchyService(ObjectService):
         hierarchy_exists = self.exists(dimension_name, hierarchy_name)
 
         if not hierarchy_exists:
-            existing_element_identifiers = set()
+            existing_element_identifiers = CaseAndSpaceInsensitiveSet()
         else:
             existing_element_identifiers = self.elements.get_all_element_identifiers(
                 dimension_name=dimension_name,
@@ -526,7 +555,7 @@ class HierarchyService(ObjectService):
             element_name: Element.Types(element_type)
             for element_name, element_type
             in df.loc[
-                ~df[element_column].isin(existing_element_identifiers),
+                ~df[element_column].str.lower().str.replace(' ', '').isin(existing_element_identifiers._store.keys()),
                 (element_column, element_type_column)
             ].itertuples(index=False)
         })
@@ -558,9 +587,12 @@ class HierarchyService(ObjectService):
 
         # new attributes are created as strings if no type is provided
         try:
-            existing_attributes = self.elements.get_all_element_identifiers(
-                dimension_name='}ElementAttributes_' + dimension_name,
-                hierarchy_name='}ElementAttributes_' + dimension_name)
+            existing_attributes = CaseAndSpaceInsensitiveDict({
+                ea.name: ElementAttribute.Types(ea.attribute_type)
+                for ea
+                in self.elements.get_element_attributes(dimension_name, hierarchy_name)
+            })
+
         except TM1pyRestException as ex:
             if ex.status_code == 404:
                 existing_attributes = set()
@@ -579,6 +611,11 @@ class HierarchyService(ObjectService):
 
             if attribute_name not in existing_attributes:
                 new_attributes.append(ElementAttribute(attribute_name, attribute_type))
+
+            if attribute_name in existing_attributes and update_attribute_types:
+                if attribute_type != existing_attributes[attribute_name]:
+                    self.elements.delete_element_attribute(dimension_name, dimension_name, attribute_name)
+                    new_attributes.append(ElementAttribute(attribute_name, attribute_type))
 
         if new_attributes:
             self.elements.add_element_attributes(
@@ -614,8 +651,29 @@ class HierarchyService(ObjectService):
                 sum_numeric_duplicates=False,
                 use_blob=True)
 
-        if unwind:
-            self.remove_all_edges(dimension_name, hierarchy_name)
+        if unwind_all:
+            self.remove_all_edges(dimension_name=dimension_name, hierarchy_name=hierarchy_name)
+        else:
+            if unwind_consolidations:
+                edges_to_delete = CaseAndSpaceInsensitiveTuplesDict()
+                for elem in unwind_consolidations:
+                    if not self.elements.exists(
+                            dimension_name=dimension_name,
+                            hierarchy_name=hierarchy_name,
+                            element_name=elem):
+                        continue
+
+                    edges_under_consolidation = self.elements.get_edges_under_consolidation(
+                        dimension_name=dimension_name,
+                        hierarchy_name=hierarchy_name,
+                        consolidation=elem)
+                    edges_to_delete.join(edges_under_consolidation)
+
+                self.elements.delete_edges(
+                    dimension_name=dimension_name,
+                    hierarchy_name=hierarchy_name,
+                    edges=edges_to_delete,
+                    use_blob=self.is_admin)
 
         edges = CaseAndSpaceInsensitiveTuplesDict()
         for element_name, *record in df[[element_column, *level_columns, *level_weight_columns]].itertuples(
@@ -637,26 +695,26 @@ class HierarchyService(ObjectService):
 
         if edges:
             try:
-                current_edges = self.elements.get_edges(
+                current_edges = CaseAndSpaceInsensitiveTuplesDict(self.elements.get_edges(
                     dimension_name=dimension_name,
-                    hierarchy_name=hierarchy_name)
+                    hierarchy_name=hierarchy_name))
             except TM1pyRestException as ex:
                 if ex.status_code == 404:
                     current_edges = CaseAndSpaceInsensitiveTuplesDict()
                 else:
                     raise ex
 
-            delete_edges = {
+            edges_to_delete = {
                 (k, v): w
                 for (k, v), w
                 in edges.items()
                 if w != current_edges.get((k, v), w)}
-            if delete_edges:
+            if edges_to_delete:
                 self.elements.delete_edges(
                     dimension_name=dimension_name,
                     hierarchy_name=hierarchy_name,
-                    edges=delete_edges.keys(),
-                    use_ti=self.is_admin)
+                    edges=edges_to_delete.keys(),
+                    use_blob=self.is_admin)
 
             new_edges = {
                 (k, v): w

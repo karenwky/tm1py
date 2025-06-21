@@ -8,7 +8,7 @@ from TM1py import TM1Service, Element, ElementAttribute, Hierarchy, Dimension, C
     Subset, Process, Chore, ChoreStartTime, ChoreFrequency, ChoreTask
 from TM1py.Objects.Application import CubeApplication, ApplicationTypes, ChoreApplication, DimensionApplication, \
     FolderApplication, LinkApplication, ProcessApplication, SubsetApplication, ViewApplication, DocumentApplication
-from .Utils import skip_if_insufficient_version, verify_version
+from .Utils import skip_if_version_lower_than, verify_version
 
 
 class TestApplicationService(unittest.TestCase):
@@ -103,7 +103,6 @@ class TestApplicationService(unittest.TestCase):
                 False)
         cls.tm1.dimensions.hierarchies.subsets.create(subset, False)
 
-
         # Build process
         p1 = Process(name=cls.process_name)
         p1.add_parameter('pRegion', 'pRegion (String)', value='US')
@@ -127,8 +126,10 @@ class TestApplicationService(unittest.TestCase):
 
         # create Folder
         app = FolderApplication("", cls.tm1py_app_folder)
-        if cls.tm1.applications.exists(path=app.path, application_type=app.application_type, name=app.name, private=False):
-            cls.tm1.applications.delete(path=app.path, application_type=app.application_type, application_name=app.name, private=False)
+        if cls.tm1.applications.exists(path=app.path, application_type=app.application_type, name=app.name,
+                                       private=False):
+            cls.tm1.applications.delete(path=app.path, application_type=app.application_type, application_name=app.name,
+                                        private=False)
             cls.tm1.applications.create(application=app, private=False)
         else:
             cls.tm1.applications.create(application=app, private=False)
@@ -241,15 +242,17 @@ class TestApplicationService(unittest.TestCase):
     def test_dimension_application_private(self):
         self.run_dimension_application(private=True)
 
-    @skip_if_insufficient_version(version="11.4")
+    @skip_if_version_lower_than(version="11.4")
     def test_dimension_application_public(self):
         self.run_dimension_application(private=False)
 
-    @skip_if_insufficient_version(version="11.4")
+    @skip_if_version_lower_than(version="11.4")
     def run_document_application(self, private):
         with open(Path(__file__).parent.joinpath('resources', 'document.xlsx'), "rb") as file:
             app = DocumentApplication(path=self.tm1py_app_folder, name=self.document_name, content=file.read())
             self.tm1.applications.create(application=app, private=private)
+
+        self.tm1.applications.update_or_create(application=app, private=private)
 
         app_retrieved = self.tm1.applications.get(app.path, app.application_type, app.name, private=private)
         self.assertEqual(app_retrieved.last_updated[:10], datetime.today().strftime('%Y-%m-%d'))
@@ -261,6 +264,9 @@ class TestApplicationService(unittest.TestCase):
         exists = self.tm1.applications.exists(
             app.path, name=app.name, application_type=ApplicationTypes.DOCUMENT, private=private)
         self.assertTrue(exists)
+
+        names = self.tm1.applications.get_names(path=self.tm1py_app_folder, private=private)
+        self.assertIn(app.name, names)
 
         self.tm1.applications.rename(app.path, application_type=ApplicationTypes.DOCUMENT,
                                      application_name=app.name, new_application_name=app.name + self.rename_suffix,
@@ -424,7 +430,7 @@ class TestApplicationService(unittest.TestCase):
         exists = self.tm1.applications.exists(
             app.path, name=app.name + self.rename_suffix, application_type=ApplicationTypes.VIEW, private=private)
         self.assertTrue(exists)
-        
+
         self.tm1.applications.delete(app.path, app.application_type, app.name + self.rename_suffix, private=private)
         exists = self.tm1.applications.exists(
             app.path, name=app.name + self.rename_suffix, application_type=ApplicationTypes.VIEW, private=private)

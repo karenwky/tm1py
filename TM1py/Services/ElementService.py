@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
+import csv
 import json
 from enum import Enum
 from io import StringIO
 from typing import List, Union, Iterable, Optional, Dict, Tuple
 
-import numpy as np
 
 from TM1py import Subset, Process
 
 try:
     import pandas as pd
+    import numpy as np
 
     _has_pandas = True
 except ImportError:
@@ -18,12 +19,15 @@ except ImportError:
 from mdxpy import MdxHierarchySet, Member, MdxLevelExpression
 from requests import Response
 
-from TM1py.Exceptions import TM1pyRestException, TM1pyException
+from TM1py.Exceptions.Exceptions import TM1pyException, TM1pyWritePartialFailureException, TM1pyWriteFailureException, \
+    TM1pyRestException
 from TM1py.Objects import ElementAttribute, Element
+from TM1py.Services.FileService import FileService
 from TM1py.Services.ObjectService import ObjectService
+from TM1py.Services.ProcessService import ProcessService
 from TM1py.Services.RestService import RestService
 from TM1py.Utils import CaseAndSpaceInsensitiveDict, format_url, CaseAndSpaceInsensitiveSet, require_data_admin, \
-    dimension_hierarchy_element_tuple_from_unique_name, require_pandas, require_version
+     require_ops_admin, dimension_hierarchy_element_tuple_from_unique_name, require_pandas, require_version
 from TM1py.Utils import build_element_unique_names, CaseAndSpaceInsensitiveTuplesDict, verify_version
 from itertools import islice
 from collections import OrderedDict
@@ -117,10 +121,13 @@ class ElementService(ObjectService):
 
     @require_version("11.4")
     def delete_edges(self, dimension_name: str, hierarchy_name: str, edges: Iterable[Tuple[str, str]] = None,
-                     use_ti: bool = False, **kwargs):
+                     use_ti: bool = False, use_blob: bool = False, remove_blob: bool = True, **kwargs):
         if use_ti:
             return self.delete_edges_use_ti(dimension_name, hierarchy_name, edges, **kwargs)
-
+            
+        if use_blob:
+            return self.delete_edges_use_blob(dimension_name, hierarchy_name, edges, remove_blob, **kwargs)
+            
         h_service = self._get_hierarchy_service()
         h = h_service.get(dimension_name, hierarchy_name, **kwargs)
         for edge in edges:
@@ -151,6 +158,95 @@ class ElementService(ObjectService):
         if not success:
             raise TM1pyException(f"Failed to delete edges through unbound process. Error: '{error_log_file}'")
 
+    @require_data_admin
+    @require_ops_admin
+    def delete_edges_use_blob(self, dimension_name: str, hierarchy_name: str, edges: List[str] = None, remove_blob: bool = True, **kwargs):
+        """
+        Remove edges in TM1 via an unbound TI process having an uploaded CSV as data source
+        :param dimension_name as str: dimension name
+        :param hierarchy_name as str: hierarchy name
+        :param edges as list: 
+        :remove_blob as bool: remove the parent child file after use, default True
+        :param kwargs:
+        :return: Success: bool, Messages: list, ChangeSet: None
+        """
+        if not edges:
+            return
+            
+        process_service = ProcessService(self._rest)
+        file_service = FileService(self._rest)
+
+        unique_name = self.suggest_unique_object_name()
+
+        # Transform cells to format that's consumable for TI
+        csv_content = StringIO()
+        csv_writer = csv.writer(
+            csv_content,
+            delimiter=",",
+            quoting=csv.QUOTE_ALL)
+        csv_writer.writerows(
+            list(edge)
+            for edge 
+            in edges)
+
+        file_name = f'{unique_name}.csv'
+        file_service.create(
+            file_name=file_name,
+            file_content=csv_content.getvalue().encode('utf-8'),
+            **kwargs)
+
+        try:
+            # Create and execute unbound TI process to delete edges using blob file
+            process = self._build_unwind_hierarchy_edges_from_blob_process(
+                dimension_name=dimension_name,
+                hierarchy_name=hierarchy_name,
+                process_name=unique_name,
+                blob_filename=file_name)
+
+            success, status, log_file = process_service.execute_process_with_return(process=process, **kwargs)
+            if not success:
+                if status in ['HasMinorErrors']:
+                    raise TM1pyWritePartialFailureException([status], [log_file], 1)
+                else:
+                    raise TM1pyWriteFailureException([status], [log_file])
+
+        finally:
+            if remove_blob:
+                file_service.delete(file_name=file_name)
+
+    def _build_unwind_hierarchy_edges_from_blob_process(self, dimension_name: str, hierarchy_name: str, process_name: str, blob_filename: str) -> Process:
+
+        # v11 automatically adds blb file extensions to documents created via the contents api
+        if not verify_version(required_version="12", version=self.version):
+            blob_filename += ".blb"
+        hierarchyupdate_process = Process(
+            name=process_name,
+            datasource_type='ASCII',
+            datasource_ascii_header_records=0,
+            datasource_data_source_name_for_server=f"{blob_filename}",
+            datasource_data_source_name_for_client=f"{blob_filename}",
+            datasource_ascii_delimiter_char=',',
+            datasource_ascii_decimal_separator='.',
+            datasource_ascii_thousand_separator='',
+            datasource_ascii_quote_character='"')
+
+        # Define encoding in Prolog section
+        hierarchyupdate_process.prolog_procedure = f"""
+        SetInputCharacterSet('TM1CS_UTF8');
+         """
+        parent_variable="vParent"
+        child_variable="vChild"
+        hierarchyupdate_process.add_variable(name=parent_variable, variable_type='String')
+        hierarchyupdate_process.add_variable(name=child_variable, variable_type='String')
+
+        # Write the statement for delete component in hierarchy
+        delete_component = f"\rHierarchyElementComponentDelete('{dimension_name}', '{hierarchy_name}', {parent_variable}, {child_variable});"
+ 
+        # Define Metadata section
+        metadata_statement = delete_component
+        hierarchyupdate_process.metadata_procedure = metadata_statement
+        return hierarchyupdate_process
+    
     def get_elements(self, dimension_name: str, hierarchy_name: str, **kwargs) -> List[Element]:
         url = format_url(
             "/Dimensions('{}')/Hierarchies('{}')/Elements?select=Name,Type",
@@ -166,6 +262,7 @@ class ElementService(ObjectService):
                                attribute_column_prefix: str = "", skip_parents: bool = False,
                                level_names: List[str] = None, parent_attribute: str = None,
                                skip_weights: bool = False, use_blob: bool = False, allow_empty_alias: bool = True,
+                               attribute_suffix: bool = False, element_type_column: str = 'Type',
                                **kwargs) -> 'pd.DataFrame':
         """
 
@@ -181,6 +278,8 @@ class ElementService(ObjectService):
         :param skip_weights: include weight columns
         :param use_blob: Up to 40% better performance and lower memory footprint in any case. Requires admin permissions
         :param allow_empty_alias: False if empty alias values should be substituted with element names instead
+        :param attribute_suffix: True if attribute columns should have ':a', ':s' or ':n' suffix
+        :param element_type_column: The column name in the df which specifies which element is which type.
         :return: pandas DataFrame
         """
 
@@ -230,7 +329,7 @@ class ElementService(ObjectService):
                   in members
                   if member["Name"] in element_types],
             dtype=str,
-            columns=[dimension_name, 'Type'])
+            columns=[dimension_name, element_type_column])
 
         calculated_members_definition = list()
         calculated_members_selection = list()
@@ -316,11 +415,6 @@ class ElementService(ObjectService):
             else:
                 column_selection = column_selection + " + {" + ",".join(calculated_members_selection) + "}"
 
-        elements = ",".join(
-            member["UniqueName"]
-            for member
-            in members)
-
         mdx_with_block = ""
         if calculated_members_definition:
             mdx_with_block = "WITH " + " ".join(calculated_members_definition)
@@ -347,7 +441,8 @@ class ElementService(ObjectService):
                 value_separator="~",
                 use_blob=True,
                 **kwargs)
-            df_data = pd.read_csv(StringIO(raw_csv), sep='~')
+
+            df_data = pd.read_csv(StringIO(raw_csv), sep='~', na_filter=False, dtype={0: str})
 
             # Use _group to avoid aggregation of multiple members into one df record
             # example: element A is part of multiple consolidations resulting df must have multiple records for A
@@ -369,7 +464,7 @@ class ElementService(ObjectService):
             df_data = cell_service.execute_mdx_dataframe_shaped(mdx, **kwargs)
 
         if levels_dict:
-            # rename level names to conform sto strandard levels "1" -> "level0001"
+            # rename level names to conform sto standard levels "1" -> "level001"
             df_data.rename(columns=levels_dict, inplace=True)
 
         # format weights
@@ -380,11 +475,38 @@ class ElementService(ObjectService):
         df_data[cols_to_format] = df_data[cols_to_format].apply(pd.to_numeric)
         df_data[cols_to_format] = df_data[cols_to_format].applymap(lambda x: '{:.6f}'.format(x))
 
-        # override columns. hierarchy name with dimension and prefix attributes
+        # override colum types
+        element_attributes = self.get_element_attributes(dimension_name, hierarchy_name)
+        attribute_column_types = {
+            ea.name: 'float' if ea.attribute_type == 'Numeric' else 'str'
+            for ea
+            in element_attributes
+            if ea.name in df_data.columns}
+        df_data = df_data.astype(attribute_column_types)
+
+        # substitute empty strings with element name if empty alias is not allowed
+        if not allow_empty_alias:
+            alias_attributes = [
+                ea.name
+                for ea in element_attributes
+                if ea.attribute_type == 'Alias' and ea.name in df_data.columns]
+
+            for col in alias_attributes:
+                df_data[col] = np.where(df_data[col] == '', df_data[dimension_name], df_data[col])
+
+        # override column names. hierarchy name with dimension and prefix attributes
         column_renaming = dict()
-        if attributes and attribute_column_prefix:
-            column_renaming = {attribute: str(attribute_column_prefix) + attribute for attribute in attributes}
+        if attribute_column_prefix or attribute_suffix:
+            column_renaming = {
+                ea.name: f"{attribute_column_prefix}{ea.name}" + (
+                    f":{ea.attribute_type.lower()[0]}"
+                    if attribute_suffix
+                    else "")
+                for ea
+                in element_attributes}
+
         column_renaming[hierarchy_name] = dimension_name
+
         df_data.rename(columns=column_renaming, inplace=True)
 
         # shift levels to right hand side
@@ -415,14 +537,6 @@ class ElementService(ObjectService):
                                                                              :,
                                                                              -len(level_columns) * 2:
                                                                              -len(level_names)].fillna(0)
-
-        if not allow_empty_alias:
-            # substitute empty strings with element name if empty alias is not allowed
-            alias_attributes = self.get_alias_element_attributes(dimension_name, hierarchy_name)
-            alias_attributes = list(set(alias_attributes).intersection(df_data.columns))
-
-            for col in alias_attributes:
-                df_data[col] = np.where(df_data[col] == '', df_data[dimension_name], df_data[col])
 
         return pd.merge(df, df_data, on=dimension_name).drop_duplicates()
 
@@ -684,6 +798,36 @@ class ElementService(ObjectService):
         rows_and_values = self._retrieve_mdx_rows_and_values(mdx, element_unique_names=element_unique_names)
         return self._extract_dict_from_rows_and_values(rows_and_values, exclude_empty_cells=exclude_empty_cells)
 
+    @require_version("11.8.023")
+    def element_lock(self, dimension_name: str, hierarchy_name: str, element_name: str, **kwargs) -> Response:
+        """ Lock element
+        :param dimension_name: Name of dimension.
+        :param hierarchy_name: Name of hierarchy.
+        :param element_name: Name of element to lock.
+        :return: response
+        """
+        url = format_url(
+            "/Dimensions('{}')/Hierarchies('{}')/Elements('{}')/tm1.Lock",
+            dimension_name,
+            hierarchy_name,
+            element_name)
+        return self._rest.POST(url, '', **kwargs)
+
+    @require_version("11.8.023")
+    def element_unlock(self, dimension_name: str, hierarchy_name: str, element_name: str, **kwargs) -> Response:
+        """ Unlock element
+        :param dimension_name: Name of dimension.
+        :param hierarchy_name: Name of hierarchy.
+        :param element_name: Name of element to unlock.
+        :return: response
+        """
+        url = format_url(
+            "/Dimensions('{}')/Hierarchies('{}')/Elements('{}')/tm1.Unlock",
+            dimension_name,
+            hierarchy_name,
+            element_name)
+        return self._rest.POST(url, '', **kwargs)
+    
     @staticmethod
     def _extract_dict_from_rows_and_values(
             rows_and_values: CaseAndSpaceInsensitiveTuplesDict,
@@ -962,6 +1106,23 @@ class ElementService(ObjectService):
 
         get_members(consolidation_tree)
         return members
+
+    def execute_set_mdx_element_names(
+        self, mdx: str, top_records: Optional[int] = None, **kwargs
+    ) -> List:
+        """
+        :method to execute an MDX statement against a dimension and get a list with element names back
+        :param mdx: valid dimension mdx statement
+        :param top_records: number of records to return, default: all elements no limit
+        :return: list of element names
+        """
+        elements = self.execute_set_mdx(
+            mdx,
+            member_properties=["Name"],
+            parent_properties=None,
+            element_properties=None,
+        )
+        return [element[0]["Name"] for element in elements]
 
     def execute_set_mdx(
             self,

@@ -37,7 +37,7 @@ from TM1py.Utils.Utils import build_pandas_dataframe_from_cellset, dimension_nam
     extract_compact_json_cellset, \
     cell_is_updateable, build_mdx_from_cellset, build_mdx_and_values_from_cellset, \
     dimension_names_from_element_unique_names, frame_to_significant_digits, build_dataframe_from_csv, \
-    drop_dimension_properties, decohints, verify_version
+    drop_dimension_properties, decohints, verify_version, lower_and_drop_spaces
 
 try:
     import pandas as pd
@@ -797,7 +797,9 @@ class CellService(ObjectService):
                         precision: int = None,
                         skip_non_updateable: bool = False, measure_dimension_elements: Dict = None,
                         sum_numeric_duplicates: bool = True, remove_blob: bool = True, allow_spread: bool = False,
-                        clear_view: str = None, **kwargs) -> str:
+                        clear_view: str = None, static_dimension_elements: Dict = None,
+                        infer_column_order: bool = False,
+                        **kwargs) -> str:
         """
         Function expects same shape as `execute_mdx_dataframe` returns.
         Column order must match dimensions in the target cube with an additional column for the values.
@@ -822,13 +824,40 @@ class CellService(ObjectService):
         :param remove_blob: remove blob file after writing with use_blob=True
         :param allow_spread: allow TI process in use_blob or use_ti to use CellPutProportionalSpread on C elements
         :param clear_view: name of cube view to clear before writing
+        :param static_dimension_elements: Dict of fixed dimension element pairs. Column is created for you.
+        :param infer_column_order: bool indicating whether the column order of the dataframe should automatically be
+         inferred and mapped to the dimension order in the cube.
         :return: changeset or None
         """
         if not isinstance(data, pd.DataFrame):
             raise ValueError("argument 'data' must of type DataFrame")
 
+        # don't mutate passed data frame. Work on a copy instead
+        data = data.copy()
+
         if not dimensions:
             dimensions = self.get_dimension_names_for_writing(cube_name=cube_name)
+
+        infer_column_order = True if static_dimension_elements else infer_column_order
+
+        # reorder columns in df to align with dimensions; CaseAndSpaceInsensitiveDict is a OrderedDict
+        if static_dimension_elements:
+            for dimension, element in static_dimension_elements.items():
+                if dimension in CaseAndSpaceInsensitiveSet(data.columns):
+                    raise ValueError("one or more of the fixed_dimension_elements are passed as a dataframe column. "
+                                     f"{dimension}: {element} is passed in fixed_dimension_elements. "
+                                     "Either remove the key value pair from the fixed_dimension_elements dict or "
+                                     f"avoid passing the {dimension} column in the dataframe.")
+                data[dimension] = element
+
+        if infer_column_order:
+            data.columns = data.columns.map(lower_and_drop_spaces)
+
+            ordered_columns = list(map(lower_and_drop_spaces, dimensions))
+
+            columns_not_in_dimensions = data.columns.difference(ordered_columns).tolist()
+
+            data = data[ordered_columns + columns_not_in_dimensions]
 
         if not len(data.columns) == len(dimensions) + 1:
             raise ValueError("Number of columns in 'data' DataFrame must be number of dimensions in cube + 1")
@@ -980,7 +1009,7 @@ class CellService(ObjectService):
         raise TM1pyWritePartialFailureException(
             statuses=list(itertools.chain(*[exception.statuses for exception in exceptions])),
             error_log_files=list(itertools.chain(*[exception.error_log_files for exception in exceptions])),
-            attempts=sum([exception.attempts for exception in exceptions]))
+            attempts=sum([exception.attempts if hasattr(exception, 'attempts') else 1 for exception in exceptions]))
 
     @manage_changeset
     def write_value(self, value: Union[str, float], cube_name: str, element_tuple: Iterable,
@@ -1419,10 +1448,12 @@ class CellService(ObjectService):
         DatasourceAsciiQuoteCharacter='{quote_character}';
         nRecord=0;
         """
+
         process.prolog_procedure = prolog_procedure
 
         # ignore some variable in file and output variables ordered by their ordinal e.g. v2,v4,v5,v11
-        comma_sep_variables = ",".join(sorted(set(variables) - set(skip_variables), key=lambda v: int(v[1:])))
+        output_variables = sorted(set(variables) - set(skip_variables), key=lambda v: int(v[1:]))
+        comma_sep_variables = ",".join(output_variables)
         data_procedure_pre = f"""
         IF (nRecord = 0);
           SetOutputCharacterSet('{file_name}','TM1CS_UTF8');
@@ -1455,6 +1486,23 @@ class CellService(ObjectService):
             data_procedure_pre += f"""
             IF (ISUNDEFINEDCELLVALUE(NVALUE,'{cube}') = 1);
               SVALUE ='0';
+            ENDIF;
+            """
+
+        for variable in output_variables + ["SVALUE"]:
+            data_procedure_pre += f"""
+            sTextToEscape = {variable};
+            sEscapeChar = '"';
+            IF (SCAN(sEscapeChar, sTextToEscape) > 0);
+                nPos = LONG ( sTextToEscape );
+                WHILE ( nPos > 0);
+                    sChar = Subst(sTextToEscape, nPos, 1);
+                    IF ( sChar @= sEscapeChar );
+                      sTextToEscape = INSRT(sEscapeChar, sTextToEscape, nPos);
+                    ENDIF;  
+                    nPos = nPos - 1;
+                END;
+                {variable} = sTextToEscape;
             ENDIF;
             """
 
@@ -1755,7 +1803,7 @@ class CellService(ObjectService):
         if increment:
             current_values = self.extract_cellset_values(cellset_id, use_compact_json=True, delete_cellset=False,
                                                          **kwargs)
-            values = (x + (y or None) for x, y in zip(values, current_values))
+            values = (float(x) + float(y or 0) for x, y in zip(values, current_values))
 
         self.update_cellset(cellset_id=cellset_id, values=values, sandbox_name=sandbox_name, **kwargs)
         return changeset
@@ -2960,7 +3008,7 @@ class CellService(ObjectService):
                                         sandbox_name=sandbox_name,
                                         use_compact_json=use_compact_json,
                                         **kwargs)
-        return Utils.build_ui_arrays_from_cellset(raw_cellset_as_dict=data, value_precision=value_precision)
+        return Utils.build_ui_arrays_from_cellset(raw_cellset_as_dict=data, value_precision=value_precision, top=top)
 
     def execute_view_ui_array(
             self,

@@ -137,10 +137,10 @@ class Process(TM1Object):
         """
         return cls(name=process_as_dict['Name'],
                    has_security_access=process_as_dict['HasSecurityAccess'],
-                   ui_data=process_as_dict['UIData'],
+                   ui_data=process_as_dict.get('UIData',''),
                    parameters=process_as_dict['Parameters'],
                    variables=process_as_dict['Variables'],
-                   variables_ui_data=process_as_dict['VariablesUIData'],
+                   variables_ui_data=process_as_dict.get('VariablesUIData',''),
                    prolog_procedure=process_as_dict['PrologProcedure'],
                    metadata_procedure=process_as_dict['MetadataProcedure'],
                    data_procedure=process_as_dict['DataProcedure'],
@@ -222,7 +222,11 @@ class Process(TM1Object):
     @epilog_procedure.setter
     def epilog_procedure(self, value: str):
         self._epilog_procedure = Process.add_generated_string_to_code(value)
-
+    
+    @property
+    def all_procedures(self) -> str:
+        return self._prolog_procedure + self._metadata_procedure + self._data_procedure + self._epilog_procedure
+    
     @property
     def datasource_type(self) -> str:
         return self._datasource_type

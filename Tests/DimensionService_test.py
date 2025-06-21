@@ -1,5 +1,6 @@
 import configparser
 import unittest
+import warnings
 from pathlib import Path
 
 from TM1py.Objects import Dimension, Hierarchy, Element
@@ -26,13 +27,11 @@ class TestDimensionService(unittest.TestCase):
         cls.config.read(Path(__file__).parent.joinpath('config.ini'))
         cls.tm1 = TM1Service(**cls.config['tm1srv01'])
 
-    @classmethod
-    def setUp(cls):
-        cls.create_dimensions()
+    def setUp(self):
+        self.create_dimensions()
 
-    @classmethod
-    def tearDown(cls):
-        cls.delete_dimensions()
+    def tearDown(self):
+        self.delete_dimensions()
 
     @classmethod
     def create_dimensions(cls):
@@ -181,12 +180,17 @@ class TestDimensionService(unittest.TestCase):
 
     def test_execute_mdx(self):
         mdx = "{TM1SubsetAll(" + self.dimension_name + ")}"
-        elements = self.tm1.dimensions.execute_mdx(self.dimension_name, mdx)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            elements = self.tm1.dimensions.execute_mdx(self.dimension_name, mdx)
         self.assertEqual(len(elements), 1001)
 
         mdx = "{ Tm1FilterByLevel ( {TM1SubsetAll(" + self.dimension_name + ")}, 0) }"
-        elements = self.tm1.dimensions.execute_mdx(self.dimension_name, mdx)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            elements = self.tm1.dimensions.execute_mdx(self.dimension_name, mdx)
         self.assertEqual(len(elements), 1000)
+        
         for element in elements:
             self.assertTrue(element.startswith("Element"))
 
@@ -203,12 +207,7 @@ class TestDimensionService(unittest.TestCase):
 
     def test_remove_leaves_hierarchy(self):
         dimension = self.tm1.dimensions.get(dimension_name=self.dimension_name_with_multi_hierarchy)
-
-        try:
-            dimension.remove_hierarchy("LEAVES")
-            raise Exception("Did not throw expected Exception")
-        except ValueError:
-            pass
+        self.assertRaises(ValueError, dimension.remove_hierarchy, "LEAVES")
 
     def test_remove_hierarchy(self):
         dimension = self.tm1.dimensions.get(dimension_name=self.dimension_name_with_multi_hierarchy)

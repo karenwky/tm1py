@@ -13,6 +13,7 @@ from dateutil import parser
 from TM1py.Exceptions import TM1pyRestException
 from TM1py.Objects import Cube, Dimension, Hierarchy, Process
 from TM1py.Services import TM1Service
+from TM1py.Utils.Utils import lower_and_drop_spaces
 
 
 @pytest.mark.skip(reason="Too slow for regular tests. Only run before releases")
@@ -426,20 +427,24 @@ class TestServerService(unittest.TestCase):
 
     def test_session_context_default(self):
         threads = self.tm1.monitoring.get_threads()
-        for thread in threads:
-            if "GET /Threads" in thread["Function"] and thread["Name"] == self.config['tm1srv01']['user']:
-                self.assertTrue(thread["Context"] == "TM1py")
-                return
-        raise Exception("Did not find my own Thread")
+        self._test_session_context(threads, "TM1py")
 
     def test_session_context_custom(self):
         app_name = "Some Application"
         with TM1Service(**self.config['tm1srv01'], session_context=app_name) as tm1:
             threads = tm1.monitoring.get_threads()
-            for thread in threads:
-                if "GET /Threads" in thread["Function"] and thread["Name"] == self.config['tm1srv01']['user']:
-                    self.assertTrue(thread["Context"] == app_name)
-                    return
+            self._test_session_context(threads, app_name)
+
+    def _test_session_context(self, threads: list, app_name: str) -> None:
+        for thread in threads:
+            if (
+                "GET /Threads" in thread["Function"]
+                or "GET /api/v1/Threads" in thread["Function"]
+            ) and lower_and_drop_spaces(thread["Name"]) == lower_and_drop_spaces(
+                self.config["tm1srv01"]["user"]
+            ):
+                self.assertTrue(thread["Context"] == app_name)
+                return
         raise Exception("Did not find my own Thread")
 
     @classmethod

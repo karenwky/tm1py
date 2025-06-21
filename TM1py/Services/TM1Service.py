@@ -1,5 +1,5 @@
 import pickle
-
+import warnings
 
 from TM1py.Services import HierarchyService, SecurityService, ApplicationService, SubsetService, \
      ProcessService, AnnotationService, ViewService, RestService, CellService, \
@@ -45,8 +45,6 @@ class TM1Service:
         :param timeout: Float - Number of seconds that the client will wait to receive the first byte.
         :param cancel_at_timeout: Abort operation in TM1 when timeout is reached
         :param async_requests_mode: changes internal REST execution mode to avoid 60s timeout on IBM cloud
-        :param tcp_keepalive: maintain the TCP connection all the time, users should choose either async_requests_mode or tcp_keepalive to run a long-run request
-                If both are True, use async_requests_mode by default
         :param connection_pool_size - In a multi threaded environment, you should set this value to a
                 higher number, such as the number of threads
         :param integrated_login: True for IntegratedSecurityMode3
@@ -62,6 +60,9 @@ class TM1Service:
         :param re_connect_on_session_timeout: attempt to reconnect once if session is timed out
         :param proxies: pass a dictionary with proxies e.g.
                 {'http': 'http://proxy.example.com:8080', 'https': 'http://secureproxy.example.com:8090'}
+        :param ssl_context: pass a user defined ssl context
+        :param cert: (optional) If String, path to SSL client cert file (.pem).
+                If Tuple, ('cert', 'key') pair
         """
         self._tm1_rest = RestService(**kwargs)
         self.annotations = AnnotationService(self._tm1_rest)
@@ -89,10 +90,11 @@ class TM1Service:
         self.audit_logs = AuditLogService(self._tm1_rest)
 
         #higher level modules
-        self.server = ServerService(self._tm1_rest)
-        self.monitoring = MonitoringService(self._tm1_rest)
         self.power_bi = PowerBiService(self._tm1_rest)
         self.loggers = LoggerService(self._tm1_rest)
+
+        self._server = None
+        self._monitoring = None
 
     def logout(self, **kwargs):
         self._tm1_rest.logout(**kwargs)
@@ -101,7 +103,22 @@ class TM1Service:
         return self
 
     def __exit__(self, exception_type, exception_value, traceback):
-        self.logout()
+        try:
+            self.logout()
+        except Exception as e:
+            warnings.warn(f"Logout Failed due to Exception: {e}")
+    
+    @property
+    def server(self):
+        if not self._server:
+             self._server = ServerService(self._tm1_rest)
+        return self._server
+    
+    @property
+    def monitoring(self):
+        if not self._monitoring:
+            self._monitoring = MonitoringService(self._tm1_rest)
+        return self._monitoring
 
     @property
     def whoami(self):

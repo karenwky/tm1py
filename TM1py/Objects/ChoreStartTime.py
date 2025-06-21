@@ -5,13 +5,13 @@ import datetime
 
 class ChoreStartTime:
     """ Utility class to handle time representation for Chore Start Time
-        
+
     """
 
     def __init__(self, year: int, month: int, day: int, hour: int, minute: int, second: int, tz: str = None):
         """
-        
-        :param year: year 
+
+        :param year: year
         :param month: month
         :param day: day
         :param hour: hour or None
@@ -34,22 +34,20 @@ class ChoreStartTime:
             tz = None
 
         # f to handle strange timestamp 2016-09-25T20:25Z instead of common 2016-09-25T20:25:00Z
+        # second is defaulted to 0 if not specified in the chore schedule
         f = lambda x: int(x) if x else 0
         return cls(year=f(start_time_string[0:4]),
                    month=f(start_time_string[5:7]),
                    day=f(start_time_string[8:10]),
                    hour=f(start_time_string[11:13]),
                    minute=f(start_time_string[14:16]),
-                   second=f(start_time_string[17:19]),
+                   second=f(0 if start_time_string[16] != ":" else start_time_string[17:19]),
                    tz=tz)
 
     @property
     def start_time_string(self) -> str:
-        # produce timestamp 2016-09-25T20:25Z instead of common 2016-09-25T20:25:00Z
-        if not self._datetime.second:
-            start_time = self._datetime.strftime("%Y-%m-%dT%H:%M")
-        else:
-            start_time = self._datetime.strftime("%Y-%m-%dT%H:%M:%S")
+        # produce timestamp 2016-09-25T20:25:00Z instead of common 2016-09-25T20:25Z where no seconds are specified
+        start_time = self._datetime.strftime("%Y-%m-%dT%H:%M:%S")
 
         if self.tz:
             start_time += self.tz
@@ -75,7 +73,8 @@ class ChoreStartTime:
         _minute = minute if minute is not None else self._datetime.minute
         _second = second if second is not None else self._datetime.second
 
-        self._datetime = self._datetime.replace(year=_year,month=_month,day=_day,hour=_hour,minute=_minute,second=_second)
+        self._datetime = self._datetime.replace(year=_year, month=_month, day=_day, hour=_hour, minute=_minute,
+                                                second=_second)
 
     def add(self, days: int = 0, hours: int = 0, minutes: int = 0, seconds: int = 0):
         self._datetime = self._datetime + datetime.timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
